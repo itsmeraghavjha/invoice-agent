@@ -1,0 +1,27 @@
+# --- Python & Virtual Environment ---
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Sensitive Credentials (CRITICAL) ---
+.env
+credentials.json
+token.json
+client_secret*.json
+
+# --- Database ---
+invoice_history.db
+
+# --- Generated Output & Temp Files ---
+*.csv
+temp_*.pdf
+*.log
+
+# --- OS & IDE Settings ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
