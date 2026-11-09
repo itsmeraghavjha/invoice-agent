@@ -9,7 +9,7 @@ import threading
 # import google.generativeai as genai
 from datetime import datetime
 from dateutil import parser as date_parser 
-from config import Config
+from config import Config, parse_since_date, today_start
 from modules.drive_tool import DriveTool
 from modules.ai_tool import InvoiceExtractor 
 from modules.database import HistoryDB
@@ -284,11 +284,11 @@ def record_failure(name, file_id, error):
         FAILED_FILES.append({'name': name, 'id': file_id, 'error': str(error)})
 
 
-def safe_list(drive_tool, folder_id, mime_type, label):
+def safe_list(drive_tool, folder_id, mime_type, label, since=None):
     """List a folder (all pages). On failure, record it and return None so the caller
     can skip just this folder instead of aborting the whole scan. Empty folder -> []."""
     try:
-        return drive_tool.list_files(folder_id, mime_type)
+        return drive_tool.list_files(folder_id, mime_type, since=since)
     except Exception as e:
         msg = f"Could not list {label}: {e}"
         print(f"     ❌ {msg}")
@@ -310,13 +310,13 @@ def latest_month_folders(folders, n=None):
 
 def process_pdfs_in_folder(drive_tool, folder, label, worker_func, results_list):
     """Process every PDF in one folder. A failure here never affects other folders."""
-    pdfs = safe_list(drive_tool, folder['id'], "application/pdf", label)
+    pdfs = safe_list(drive_tool, folder['id'], "application/pdf", label, since=Config.SINCE)
     if pdfs is None:
         return
 
     # Surface files we do NOT process, so they are not silently ignored.
     try:
-        for o in drive_tool.list_other_files(folder['id']):
+        for o in drive_tool.list_other_files(folder['id'], since=Config.SINCE):
             SCAN_WARNINGS.append(f"{label}/{o['name']} ({o.get('mimeType')}) - not a PDF, skipped")
     except Exception as e:
         SCAN_WARNINGS.append(f"{label}: could not check for non-PDF files ({e})")
@@ -513,8 +513,22 @@ def main():
     mode = args[0].lower() if args else "both"
     if '--dry-run' in sys.argv:
         Config.DRY_RUN = True
+
+    # Hard date cutoff for THIS run:  --today  or  --since=YYYY-MM-DD
+    if '--today' in sys.argv:
+        Config.SINCE = today_start()
+    for a in sys.argv[1:]:
+        if a.startswith('--since'):
+            try:
+                Config.SINCE = parse_since_date(a.split('=', 1)[1])
+            except (IndexError, ValueError):
+                print("❌ Use the date like this: --since=2026-11-09  (no spaces)")
+                return
+
     if Config.DRY_RUN:
         print("🧪 DRY RUN: listing what would be processed; nothing will be written or emailed.")
+    if Config.SINCE:
+        print(f"📅 Only files created or modified on/after {Config.SINCE:%d-%b-%Y %H:%M} are considered.")
     print(f"🗓️  Scanning the latest {Config.MONTHS_LOOKBACK} month folder(s) per location.")
 
     # === CYCLE 1: PO INVOICES ===

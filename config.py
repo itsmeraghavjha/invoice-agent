@@ -1,8 +1,20 @@
 # config.py
 import os
+from datetime import date, datetime, time
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def parse_since_date(text):
+    """'2026-11-09' -> midnight at the start of that day, in this machine's local timezone."""
+    return datetime.strptime(text.strip(), "%Y-%m-%d").astimezone()
+
+
+def today_start():
+    """Midnight at the start of today, in this machine's local timezone."""
+    return datetime.combine(date.today(), time.min).astimezone()
+
 
 class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -35,6 +47,11 @@ class Config:
     # Dry run: list what would be processed without calling Gemini or writing anything.
     # Can also be switched on per run with:  python main.py --dry-run
     DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
+    # Hard cutoff: only files CREATED or MODIFIED on/after this moment are considered.
+    # Set per run with  --today  or  --since=YYYY-MM-DD. Deliberately NOT an environment
+    # variable, so a forgotten setting can never silently hide new invoices on later runs.
+    SINCE = None
 
     DB_FILE = "invoice_history.db"
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']

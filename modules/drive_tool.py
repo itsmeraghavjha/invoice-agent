@@ -41,13 +41,24 @@ class DriveTool:
             includeItemsFromAllDrives=True,
         ).execute()
 
-    def list_files(self, folder_id, mime_type):
+    @staticmethod
+    def _since_clause(since):
+        """Drive query fragment: only files created OR modified on/after `since`.
+        (Both, because a file moved in from elsewhere keeps its old creation time.)"""
+        if since is None:
+            return ""
+        ts = since.isoformat()  # e.g. 2026-11-09T00:00:00+05:30 (RFC 3339)
+        return f" and (createdTime >= '{ts}' or modifiedTime >= '{ts}')"
+
+    def list_files(self, folder_id, mime_type, since=None):
         """Return ALL matching files in a folder, following every page of results.
 
         Raises if a page still fails after retries, so callers never act on a
-        partial listing without knowing it.
+        partial listing without knowing it. `since` (a datetime) limits the result to
+        files created or modified on/after that moment.
         """
-        query = f"'{folder_id}' in parents and mimeType = '{mime_type}' and trashed = false"
+        query = (f"'{folder_id}' in parents and mimeType = '{mime_type}' and trashed = false"
+                 + self._since_clause(since))
         files = []
         page_token = None
         while True:
@@ -57,7 +68,7 @@ class DriveTool:
             if not page_token:
                 return files
 
-    def list_other_files(self, folder_id):
+    def list_other_files(self, folder_id, since=None):
         """Files in a folder that are neither PDFs nor sub-folders (images, Word files,
         Drive shortcuts, ...). The scanner never processes these, so it reports them
         instead of letting them be skipped silently."""
@@ -65,7 +76,7 @@ class DriveTool:
             f"'{folder_id}' in parents and trashed = false "
             "and mimeType != 'application/pdf' "
             "and mimeType != 'application/vnd.google-apps.folder'"
-        )
+        ) + self._since_clause(since)
         files = []
         page_token = None
         while True:

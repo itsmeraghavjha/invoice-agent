@@ -4,6 +4,7 @@ Gemini access is needed:  python -m pytest tests/ -v
 import json
 import os
 import sys
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from google.genai import errors as genai_errors
@@ -11,7 +12,7 @@ from google.genai import errors as genai_errors
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main
-from config import Config
+from config import Config, parse_since_date, today_start
 from modules import ai_tool
 from modules.drive_tool import DriveTool, PAGE_SIZE
 
@@ -66,6 +67,7 @@ def clean_state(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "DB_FILE", str(tmp_path / "test.db"))
     monkeypatch.setattr(Config, "DRY_RUN", False)
     monkeypatch.setattr(Config, "MONTHS_LOOKBACK", 2)
+    monkeypatch.setattr(Config, "SINCE", None)
     monkeypatch.setattr("time.sleep", lambda *_: None)  # make retry back-offs instant
 
 
@@ -138,13 +140,16 @@ class FakeTree:
 
     def __init__(self, children, broken=()):
         self.children, self.broken = children, set(broken)
+        self.since_seen = []  # the `since` passed to every listing
 
-    def list_files(self, folder_id, mime):
+    def list_files(self, folder_id, mime, since=None):
+        self.since_seen.append(since)
         if folder_id in self.broken:
             raise OSError(f"boom {folder_id}")
         return [c for c in self.children.get(folder_id, []) if c["mimeType"] == mime]
 
-    def list_other_files(self, folder_id):
+    def list_other_files(self, folder_id, since=None):
+        self.since_seen.append(since)
         return [c for c in self.children.get(folder_id, [])
                 if c["mimeType"] not in (self.FOLDER, self.PDF)]
 
@@ -276,3 +281,59 @@ def test_empty_file_is_a_failure_not_a_silent_success(tmp_path):
     ex = ai_tool.InvoiceExtractor.__new__(ai_tool.InvoiceExtractor)
     with pytest.raises(ValueError):
         ex._generate(str(empty), "prompt")
+
+
+# ------------------------------------------------------------- date cutoff (--today)
+CUTOFF = datetime(2026, 11, 9, 0, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+
+
+def test_since_adds_created_or_modified_filter_to_drive_query():
+    drive, api = make_drive([{"id": "a", "name": "a.pdf"}])
+    drive.list_files("folder", "application/pdf", since=CUTOFF)
+    q = api.calls[0]["q"]
+    assert "createdTime >= '2026-11-09T00:00:00+05:30'" in q
+    assert "modifiedTime >= '2026-11-09T00:00:00+05:30'" in q   # a moved-in file keeps its old createdTime
+    assert " or " in q and q.count("(") == 1                    # OR is parenthesised, so it can't leak
+    assert "'folder' in parents" in q and "trashed = false" in q
+
+
+def test_since_also_filters_the_non_pdf_warning_listing():
+    drive, api = make_drive([])
+    drive.list_other_files("folder", since=CUTOFF)
+    assert "createdTime >= '2026-11-09T00:00:00+05:30'" in api.calls[0]["q"]
+
+
+def test_no_since_means_no_date_filter():
+    drive, api = make_drive([])
+    drive.list_files("folder", "application/pdf")
+    drive.list_other_files("folder")
+    assert all("createdTime" not in c["q"] and "modifiedTime" not in c["q"] for c in api.calls)
+
+
+def test_cutoff_is_applied_to_every_file_listing_in_a_scan(monkeypatch):
+    monkeypatch.setattr(Config, "SINCE", CUTOFF)
+    F, P = FakeTree.FOLDER, FakeTree.PDF
+    tree = FakeTree({"root": [node("cat", "Regions", F)], "cat": [node("g", "N", F)],
+                     "g": [node("nov", "NOV-26", F), node("oct", "OCT-26", F)],
+                     "nov": [node("p1", "a.pdf", P)], "oct": [node("p2", "b.pdf", P)]})
+    main.scan_and_process_non_po(tree, "root", lambda p: {"id": p["id"]}, [])
+    # folder listings carry no cutoff; every PDF / non-PDF listing (4 of them, 2 per month) does
+    assert tree.since_seen.count(CUTOFF) == 4
+
+
+def test_parse_since_date_is_local_midnight():
+    d = parse_since_date("2026-11-09")
+    assert (d.year, d.month, d.day, d.hour, d.minute) == (2026, 11, 9, 0, 0)
+    assert d.tzinfo is not None                      # Drive requires a timezone offset
+    assert d.isoformat().startswith("2026-11-09T00:00:00")
+
+
+def test_parse_since_date_rejects_garbage():
+    with pytest.raises(ValueError):
+        parse_since_date("09/11/2026")
+
+
+def test_today_start_is_midnight_today():
+    t = today_start()
+    assert t.date() == date.today() and (t.hour, t.minute, t.second) == (0, 0, 0)
+    assert t.tzinfo is not None

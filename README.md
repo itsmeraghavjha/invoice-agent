@@ -44,7 +44,11 @@ python main.py                  # run both pipelines
 python main.py po               # PO invoices only
 python main.py nonpo            # Non-PO invoices only
 python main.py both --dry-run   # list what WOULD be processed; nothing is called, written or logged
+python main.py both --today     # only files created/modified today (hard cutoff for this run)
+python main.py both --since=2026-11-09   # only files created/modified on/after that date
 ```
+
+`--today` / `--since=` filter on the Drive **created or modified** time, so older files are ignored even if they sit in a month folder that is being scanned. They apply to one run only (not an env setting), so a later normal run is never limited by accident. Combine with `--dry-run` to preview first.
 
 ## Not missing invoices
 
