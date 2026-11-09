@@ -43,14 +43,30 @@ class EmailSender:
             print(f"⚠️ Failed to attach file: {e}")
             return
 
+        self._deliver(msg)
+
+    def send_alert(self, details):
+        """Email a plain-text heads-up about invoices that may have been missed."""
+        msg = MIMEMultipart()
+        msg['From'] = self.sender_email
+        msg['To'] = ", ".join(self.receivers)
+        msg['Subject'] = f"Invoice Bot ATTENTION - {datetime.now().strftime('%d-%b-%Y')}"
+        body = (
+            "Hello Team,\n\nThe Invoice Bot finished its run, but some invoices may need "
+            "a manual look:\n\n" + details + "\n\nRegards,\nInvoice Automation Agent"
+        )
+        msg.attach(MIMEText(body, 'plain'))
+        self._deliver(msg)
+
+    def _deliver(self, msg):
         try:
             server = smtplib.SMTP('smtp.gmail.com', 587)
             server.starttls()
             server.login(self.sender_email, self.password)
-            
+
             # Send to the list of receivers
             server.sendmail(self.sender_email, self.receivers, msg.as_string())
-            
+
             server.quit()
             print(f"📧 Email sent successfully to {len(self.receivers)} recipients.")
         except Exception as e:

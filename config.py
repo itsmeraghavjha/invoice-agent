@@ -24,5 +24,17 @@ class Config:
     _email_clean = _email_raw.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
     RECEIVER_EMAILS = [e.strip() for e in _email_clean.split(",") if e.strip()]
     
+    # How many of the most recent "Month-YY" folders to scan per location (min 1).
+    # 2 = current + previous month, so late-filed invoices are still picked up.
+    # Already-processed files are skipped via the history DB, so a higher value is safe.
+    try:
+        MONTHS_LOOKBACK = max(1, int(os.getenv("MONTHS_LOOKBACK", "2")))
+    except ValueError:
+        MONTHS_LOOKBACK = 2
+
+    # Dry run: list what would be processed without calling Gemini or writing anything.
+    # Can also be switched on per run with:  python main.py --dry-run
+    DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in ("1", "true", "yes")
+
     DB_FILE = "invoice_history.db"
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
