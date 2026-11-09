@@ -54,6 +54,7 @@ python main.py both --since=2026-11-09   # only files created/modified on/after 
 
 - **Full pagination.** Drive folder listings follow every page (1000 per page), with retries. A listing that still fails raises instead of returning a partial list.
 - **Month lookback.** The latest `MONTHS_LOOKBACK` month folders (default 2) are scanned in every location, so invoices filed late into last month's folder are still picked up. Processed files are skipped via the history DB.
+- **Sub-folders are searched.** Non-PO invoices are found directly in a month folder and also in any sub-folder below it (up to 3 levels), e.g. `HO- F&A/Nov-26/2. Stock and Service PO's/`.
 - **Failures are isolated and reported.** One unreadable folder or failing PDF no longer stops the run. After each run an **ATTENTION** email lists unreadable folders, PDFs that failed (retried automatically next run, since they are not logged as done) and non-PDF files that were skipped.
 - **Gemini retries.** Rate limits (429), server errors (5xx), network errors and truncated JSON are retried with exponential back-off.
 - **No silent loss.** If no staging path is set, the local output `.txt` is kept (never deleted after the invoices are logged as processed).

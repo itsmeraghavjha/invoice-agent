@@ -406,6 +406,25 @@ def scan_and_process(drive_tool, root_id, worker_func, results_list):
             process_pdfs_in_folder(drive_tool, subfolder, label, worker_func, results_list)
 
 
+# How many folder levels below a month folder are searched for PDFs.
+# Some months keep invoices in sub-folders (e.g. Nov-26/2. Stock and Service PO's/).
+MAX_SUBFOLDER_DEPTH = 3
+
+
+def process_folder_tree(drive_tool, folder, label, worker_func, results_list, depth=0):
+    """Process the PDFs in a folder AND in every sub-folder below it (up to
+    MAX_SUBFOLDER_DEPTH levels), so invoices are found wherever they are filed."""
+    process_pdfs_in_folder(drive_tool, folder, label, worker_func, results_list)
+
+    if depth >= MAX_SUBFOLDER_DEPTH:
+        return
+    subfolders = safe_list(drive_tool, folder['id'], FOLDER_MIME, label)
+    for sub in subfolders or []:
+        print(f"              📂 Sub-folder: {sub['name']}")
+        process_folder_tree(drive_tool, sub, f"{label}/{sub['name']}",
+                            worker_func, results_list, depth + 1)
+
+
 def scan_and_process_non_po(drive_tool, root_id, worker_func, results_list):
     """
     Structure (as of Aug 2026):
@@ -415,7 +434,8 @@ def scan_and_process_non_po(drive_tool, root_id, worker_func, results_list):
     ├── Sales Offices/<SO Name>/<Month-YY>/*.pdf
     └── Head Office/<HO Dept>/<Month-YY>/*.pdf
 
-    i.e. Category -> Group -> recent Month folders -> PDFs.
+    i.e. Category -> Group -> recent Month folders -> PDFs, plus any PDFs filed in
+    sub-folders of a month folder (e.g. HO- F&A/Nov-26/2. Stock and Service PO's/).
     All three categories follow the identical pattern, so we just loop
     over whatever category folders exist at the root instead of hardcoding
     "Regions"/"Sales Offices"/"Head Office" by name (keeps it resilient if
@@ -453,7 +473,7 @@ def scan_and_process_non_po(drive_tool, root_id, worker_func, results_list):
 
             for month in months:
                 print(f"           📅 Month: {month['name']}")
-                process_pdfs_in_folder(
+                process_folder_tree(
                     drive_tool, month, f"{label}/{month['name']}", worker_func, results_list
                 )
 
