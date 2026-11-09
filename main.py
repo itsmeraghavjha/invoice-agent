@@ -5,6 +5,7 @@ import time
 import random
 import pandas as pd
 import concurrent.futures
+import threading
 # import google.generativeai as genai
 from datetime import datetime
 from dateutil import parser as date_parser 
@@ -141,6 +142,7 @@ def process_po_invoice(pdf_info):
         }
     except Exception as e:
         print(f"  ❌ Error on {pdf_info['name']}: {e}")
+        record_failure(pdf_info['name'], pdf_info['id'], e)  # not logged as done -> retried next run
         return None
     finally:
         if os.path.exists(temp_path): 
@@ -208,6 +210,7 @@ def process_non_po_invoice(pdf_info):
         
     except Exception as e:
         print(f"  ❌ Error on {pdf_info['name']}: {e}")
+        record_failure(pdf_info['name'], pdf_info['id'], e)  # not logged as done -> retried next run
         return None
     finally:
         if os.path.exists(temp_path):
@@ -266,151 +269,219 @@ def process_non_po_invoice(pdf_info):
 #         print(f"❌ Scan Error: {e}")
 
 
+# --- SCAN HELPERS ---
+# Anything that goes wrong during a scan is recorded here and reported at the end of
+# the run (console + email), instead of being buried in the log or silently dropped.
+FOLDER_MIME = "application/vnd.google-apps.folder"
+SCAN_ERRORS = []      # folders we could not read -> invoices inside may have been missed
+SCAN_WARNINGS = []    # non-PDF files that were skipped (photos, shortcuts, Word files...)
+FAILED_FILES = []     # PDFs that failed to process; not logged as done, so retried next run
+_state_lock = threading.Lock()
+
+
+def record_failure(name, file_id, error):
+    with _state_lock:
+        FAILED_FILES.append({'name': name, 'id': file_id, 'error': str(error)})
+
+
+def safe_list(drive_tool, folder_id, mime_type, label):
+    """List a folder (all pages). On failure, record it and return None so the caller
+    can skip just this folder instead of aborting the whole scan. Empty folder -> []."""
+    try:
+        return drive_tool.list_files(folder_id, mime_type)
+    except Exception as e:
+        msg = f"Could not list {label}: {e}"
+        print(f"     ❌ {msg}")
+        SCAN_ERRORS.append(msg)
+        return None
+
+
+def latest_month_folders(folders, n=None):
+    """The n most recent 'Month-YY' folders, newest first. n defaults to Config.MONTHS_LOOKBACK.
+
+    Looking back more than one month catches invoices that are filed late, e.g. dropped
+    into last month's folder after the month ended. Already-processed files are skipped
+    via the history DB, so re-scanning an older month is cheap.
+    """
+    n = n or Config.MONTHS_LOOKBACK
+    dated = [f for f in folders if parse_smart_date(f['name'])]
+    return sorted(dated, key=lambda x: parse_smart_date(x['name']), reverse=True)[:n]
+
+
+def process_pdfs_in_folder(drive_tool, folder, label, worker_func, results_list):
+    """Process every PDF in one folder. A failure here never affects other folders."""
+    pdfs = safe_list(drive_tool, folder['id'], "application/pdf", label)
+    if pdfs is None:
+        return
+
+    # Surface files we do NOT process, so they are not silently ignored.
+    try:
+        for o in drive_tool.list_other_files(folder['id']):
+            SCAN_WARNINGS.append(f"{label}/{o['name']} ({o.get('mimeType')}) - not a PDF, skipped")
+    except Exception as e:
+        SCAN_WARNINGS.append(f"{label}: could not check for non-PDF files ({e})")
+
+    if not pdfs:
+        print(f"           (No PDFs found in {label})")
+        return
+
+    if Config.DRY_RUN:
+        db = HistoryDB(Config.DB_FILE)
+        try:
+            new = [p for p in pdfs if not db.is_processed(p['id'])]
+        finally:
+            db.close()
+        print(f"           [DRY RUN] {label}: {len(new)} of {len(pdfs)} PDFs would be processed")
+        for p in new:
+            print(f"              - {p['name']}")
+        return
+
+    print(f"           Found {len(pdfs)} PDFs in {label}, processing...")
+    # Reduced to 2 max workers to prevent Gemini API 400 errors
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        futures = {ex.submit(worker_func, p): p for p in pdfs}
+        for f in concurrent.futures.as_completed(futures):
+            try:
+                res = f.result()
+            except Exception as e:
+                record_failure(futures[f]['name'], futures[f]['id'], e)
+                continue
+            if res:
+                if isinstance(res, list):
+                    results_list.extend(res)  # Unpacks the multiple lines from Non-PO
+                else:
+                    results_list.append(res)  # Normal PO single line
+
+
 # --- SMART SCANNER ---
 def scan_and_process(drive_tool, root_id, worker_func, results_list):
-    try:
-        # 1. Look for all folders at the root level
-        root_subs = drive_tool.list_files(root_id, "application/vnd.google-apps.folder")
-        if not root_subs:
-            print("     (Folder is empty)")
-            return
+    root_subs = safe_list(drive_tool, root_id, FOLDER_MIME, "PO root folder")
+    if root_subs is None:
+        return
+    if not root_subs:
+        print("     (Folder is empty)")
+        return
 
-        targets = []
-        
-        # 2. Find Date folders at the root (if any stray ones exist like JAN-26)
-        date_folders = [f for f in root_subs if parse_smart_date(f['name'])]
-        if date_folders:
-            latest_root_date = sorted(date_folders, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
-            targets.append(latest_root_date)
+    targets = []
 
-        # 3. ALWAYS check the Region folders (folders that are NOT dates, like KSG REGION)
-        region_folders = [f for f in root_subs if not parse_smart_date(f['name'])]
-        if region_folders:
-            print("     👉 Checking Region folders...")
-            for region in region_folders:
-                sub_subs = drive_tool.list_files(region['id'], "application/vnd.google-apps.folder")
-                valid_dates = [s for s in sub_subs if parse_smart_date(s['name'])]
-                if valid_dates:
-                    # Grab the latest month folder inside this region
-                    best_sub = sorted(valid_dates, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
-                    # Update name for clean logging
-                    best_sub['name'] = f"{region['name']}/{best_sub['name']}"
-                    targets.append(best_sub)
+    # 1. Stray month folders at the root (e.g. JAN-26)
+    targets.extend(latest_month_folders(root_subs))
 
-        if not targets:
-            print("     ❌ No valid 'Month Year' folders found anywhere.")
-            return
+    # 2. ALWAYS check the Region folders (folders that are NOT dates, like KSG REGION)
+    region_folders = [f for f in root_subs if not parse_smart_date(f['name'])]
+    if region_folders:
+        print("     👉 Checking Region folders...")
+    for region in region_folders:
+        sub_subs = safe_list(drive_tool, region['id'], FOLDER_MIME, region['name'])
+        if not sub_subs:
+            continue
+        for month in latest_month_folders(sub_subs):
+            # Copy with a combined name for clean logging
+            targets.append({**month, 'name': f"{region['name']}/{month['name']}"})
 
-        # Allowed subfolder names based on your exact Drive structure
-        allowed_subfolders = ["1. Capex", "2. Stock and Service PO's"]
+    if not targets:
+        print("     ❌ No valid 'Month Year' folders found anywhere.")
+        SCAN_ERRORS.append("PO scan: no valid 'Month Year' folders found anywhere")
+        return
 
-        for target in targets:
-            print(f"     📍 Scanning Month/Year Folder: {target['name']}")
-            
-            # Step 1: List all subfolders INSIDE the 'Month Year' folder
-            subfolders = drive_tool.list_files(target['id'], "application/vnd.google-apps.folder")
-            
-            # Step 2: Filter to strictly include only our allowed subfolders
-            target_subfolders = [
-                sf for sf in subfolders 
-                if sf['name'] in allowed_subfolders
-            ]
+    # Allowed subfolder names based on your exact Drive structure
+    allowed_subfolders = ["1. Capex", "2. Stock and Service PO's"]
 
-            if not target_subfolders:
-                print(f"        (None of the target subfolders {allowed_subfolders} found in this month)")
-                continue
+    for target in targets:
+        print(f"     📍 Scanning Month/Year Folder: {target['name']}")
 
-            # Step 3: Loop through ONLY the allowed subfolders and pull their PDFs
-            for subfolder in target_subfolders:
-                print(f"        📂 Diving into Subfolder: {subfolder['name']}")
-                pdfs = drive_tool.list_files(subfolder['id'], "application/pdf")
-                
-                if not pdfs:
-                    print("           (No PDFs found here)")
-                    continue
-                
-                # Reduced to 2 max workers to prevent Gemini API 400 errors
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    futures = [ex.submit(worker_func, p) for p in pdfs]
-                    for f in concurrent.futures.as_completed(futures):
-                        res = f.result()
-                        if res:
-                            if isinstance(res, list):
-                                results_list.extend(res) # Unpacks the multiple lines from Non-PO
-                            else:
-                                results_list.append(res) # Normal PO single line
+        subfolders = safe_list(drive_tool, target['id'], FOLDER_MIME, target['name'])
+        if subfolders is None:
+            continue
 
-    except Exception as e:
-        print(f"❌ Scan Error: {e}")
+        # Only the allowed subfolders hold invoices
+        target_subfolders = [sf for sf in subfolders if sf['name'] in allowed_subfolders]
+        if not target_subfolders:
+            print(f"        (None of the target subfolders {allowed_subfolders} found in this month)")
+            continue
 
+        for subfolder in target_subfolders:
+            label = f"{target['name']}/{subfolder['name']}"
+            print(f"        📂 Diving into Subfolder: {subfolder['name']}")
+            process_pdfs_in_folder(drive_tool, subfolder, label, worker_func, results_list)
 
 
 def scan_and_process_non_po(drive_tool, root_id, worker_func, results_list):
     """
-    New structure (as of Aug 2026):
+    Structure (as of Aug 2026):
 
     Non PO based Invoice Processing/
     ├── Regions/<Region Name>/<Month-YY>/*.pdf
     ├── Sales Offices/<SO Name>/<Month-YY>/*.pdf
     └── Head Office/<HO Dept>/<Month-YY>/*.pdf
 
-    i.e. Category -> Group -> latest Month folder -> PDFs.
+    i.e. Category -> Group -> recent Month folders -> PDFs.
     All three categories follow the identical pattern, so we just loop
     over whatever category folders exist at the root instead of hardcoding
     "Regions"/"Sales Offices"/"Head Office" by name (keeps it resilient if
     they rename/add a category again).
     """
-    try:
-        # Level 1: Category folders (Regions, Sales Offices, Head Office)
-        category_folders = drive_tool.list_files(root_id, "application/vnd.google-apps.folder")
-        if not category_folders:
-            print("     (Non-PO root folder is empty)")
-            return
+    category_folders = safe_list(drive_tool, root_id, FOLDER_MIME, "Non-PO root folder")
+    if category_folders is None:
+        return
+    if not category_folders:
+        print("     (Non-PO root folder is empty)")
+        return
 
-        for category in category_folders:
-            print(f"     📁 Category: {category['name']}")
+    for category in category_folders:
+        print(f"     📁 Category: {category['name']}")
 
-            # Level 2: Group folders (Region name / SO name / HO dept)
-            group_folders = drive_tool.list_files(category['id'], "application/vnd.google-apps.folder")
-            if not group_folders:
-                print(f"        (No sub-folders found under {category['name']})")
+        group_folders = safe_list(drive_tool, category['id'], FOLDER_MIME, category['name'])
+        if group_folders is None:
+            continue
+        if not group_folders:
+            print(f"        (No sub-folders found under {category['name']})")
+            continue
+
+        for group in group_folders:
+            label = f"{category['name']}/{group['name']}"
+            print(f"        👤 Group: {label}")
+
+            month_folders = safe_list(drive_tool, group['id'], FOLDER_MIME, label)
+            if month_folders is None:
                 continue
 
-            for group in group_folders:
-                label = f"{category['name']}/{group['name']}"
-                print(f"        👤 Group: {label}")
+            months = latest_month_folders(month_folders)
+            if not months:
+                print(f"           (No valid month folders found for {label})")
+                continue
 
-                # Level 3: Month folders inside each group
-                month_folders = drive_tool.list_files(group['id'], "application/vnd.google-apps.folder")
-                valid_months = [f for f in month_folders if parse_smart_date(f['name'])]
+            for month in months:
+                print(f"           📅 Month: {month['name']}")
+                process_pdfs_in_folder(
+                    drive_tool, month, f"{label}/{month['name']}", worker_func, results_list
+                )
 
-                if not valid_months:
-                    print(f"           (No valid month folders found for {label})")
-                    continue
 
-                # Take only the latest month
-                latest = sorted(valid_months, key=lambda x: parse_smart_date(x['name']), reverse=True)[0]
-                print(f"           📅 Latest month: {latest['name']}")
+def report_problems(email):
+    """Print and email everything that may have caused an invoice to be missed."""
+    if not (FAILED_FILES or SCAN_ERRORS or SCAN_WARNINGS):
+        return
 
-                # Level 4: PDFs directly inside the month folder
-                pdfs = drive_tool.list_files(latest['id'], "application/pdf")
-                if not pdfs:
-                    print(f"              (No PDFs found in {latest['name']})")
-                    continue
+    lines = []
+    if SCAN_ERRORS:
+        lines.append(f"FOLDERS THAT COULD NOT BE READ ({len(SCAN_ERRORS)}) - invoices in them may be missing:")
+        lines += [f"  - {m}" for m in SCAN_ERRORS]
+    if FAILED_FILES:
+        lines.append(f"PDFs THAT FAILED TO PROCESS ({len(FAILED_FILES)}) - will be retried automatically next run:")
+        lines += [f"  - {f['name']}: {f['error']}" for f in FAILED_FILES]
+    if SCAN_WARNINGS:
+        lines.append(f"FILES SKIPPED, NOT PDFs ({len(SCAN_WARNINGS)}) - process these manually or convert them to PDF:")
+        lines += [f"  - {m}" for m in SCAN_WARNINGS]
+    text = "\n".join(lines)
 
-                print(f"              Found {len(pdfs)} PDFs, processing...")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    futures = [ex.submit(worker_func, p) for p in pdfs]
-                    for f in concurrent.futures.as_completed(futures):
-                        res = f.result()
-                        if res:
-                            if isinstance(res, list):
-                                results_list.extend(res)
-                            else:
-                                results_list.append(res)
-
+    print("\n⚠️  ATTENTION - some invoices may need a look:\n" + text)
+    if Config.DRY_RUN:
+        return
+    try:
+        email.send_alert(text)
     except Exception as e:
-        print(f"❌ Non-PO Scan Error: {e}")
+        print(f"❌ Could not send the alert email: {e}")
 
 
 # --- MAIN ---
@@ -436,8 +507,15 @@ def main():
     po_results = []
     non_po_results = []
 
-    # Which mode to run: "po", "nonpo", or "both" (default)
-    mode = sys.argv[1].lower() if len(sys.argv) > 1 else "both"
+    # Which mode to run: "po", "nonpo", or "both" (default). Add --dry-run to only
+    # list what WOULD be processed (no Gemini calls, no files written, nothing logged as done).
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    mode = args[0].lower() if args else "both"
+    if '--dry-run' in sys.argv:
+        Config.DRY_RUN = True
+    if Config.DRY_RUN:
+        print("🧪 DRY RUN: listing what would be processed; nothing will be written or emailed.")
+    print(f"🗓️  Scanning the latest {Config.MONTHS_LOOKBACK} month folder(s) per location.")
 
     # === CYCLE 1: PO INVOICES ===
     if mode in ("po", "both") and Config.ROOT_FOLDER_ID:
@@ -495,8 +573,8 @@ def main():
         # 3. Cleanup temporary files
         if os.path.exists(filename_po_excel):
             os.remove(filename_po_excel) # Always delete the temp Excel file
-        if not staging_path_po and os.path.exists(save_path_po_txt):
-            os.remove(save_path_po_txt)
+        # NOTE: when no staging path is set the local .txt is deliberately KEPT. The
+        # invoices are already logged as processed, so deleting it would lose them.
 
     # --- NON-PO REPORT ---
     if non_po_results:
@@ -557,11 +635,12 @@ def main():
         # 3. Cleanup temporary files
         if os.path.exists(filename_npo_excel):
             os.remove(filename_npo_excel)
-        if not staging_path_npo and os.path.exists(save_path_npo_txt):
-            os.remove(save_path_npo_txt)
+        # NOTE: local .txt is deliberately KEPT when no staging path is set (see PO block).
 
-    if not po_results and not non_po_results:
+    if not po_results and not non_po_results and not Config.DRY_RUN:
         print("✅ No new invoices found.")
+
+    report_problems(email)
 
 if __name__ == "__main__":
     main()

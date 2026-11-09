@@ -40,7 +40,27 @@ modules/
 ## Usage
 
 ```
-python main.py          # run both pipelines
-python main.py po       # PO invoices only
-python main.py nonpo    # Non-PO invoices only
+python main.py                  # run both pipelines
+python main.py po               # PO invoices only
+python main.py nonpo            # Non-PO invoices only
+python main.py both --dry-run   # list what WOULD be processed; nothing is called, written or logged
 ```
+
+## Not missing invoices
+
+- **Full pagination.** Drive folder listings follow every page (1000 per page), with retries. A listing that still fails raises instead of returning a partial list.
+- **Month lookback.** The latest `MONTHS_LOOKBACK` month folders (default 2) are scanned in every location, so invoices filed late into last month's folder are still picked up. Processed files are skipped via the history DB.
+- **Failures are isolated and reported.** One unreadable folder or failing PDF no longer stops the run. After each run an **ATTENTION** email lists unreadable folders, PDFs that failed (retried automatically next run, since they are not logged as done) and non-PDF files that were skipped.
+- **Gemini retries.** Rate limits (429), server errors (5xx), network errors and truncated JSON are retried with exponential back-off.
+- **No silent loss.** If no staging path is set, the local output `.txt` is kept (never deleted after the invoices are logged as processed).
+
+After changing `MONTHS_LOOKBACK`, run once with `--dry-run` to see which previously-unseen files it will pick up.
+
+## Tests
+
+```
+pip install pytest
+python -m pytest tests/ -v
+```
+
+The tests use fakes for Drive and Gemini, so no credentials are needed.

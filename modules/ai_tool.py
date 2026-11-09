@@ -170,31 +170,79 @@
 
 import os
 import json
+import time
 from datetime import date
+import httpx
 from google import genai
 from google.genai import types
-from google.api_core.exceptions import ResourceExhausted
-from tenacity import retry, retry_if_exception_type, wait_fixed
+from google.genai import errors as genai_errors
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+# HTTP statuses from the Gemini API that are worth retrying (rate limit / server trouble).
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+def _is_retryable(exc):
+    """True for transient Gemini failures: 429/5xx, network errors, truncated JSON."""
+    if isinstance(exc, genai_errors.APIError):
+        return exc.code in RETRYABLE_STATUS
+    return isinstance(exc, (json.JSONDecodeError, httpx.TransportError, ConnectionError, TimeoutError))
+
+
+def _state_name(f):
+    state = getattr(f, "state", None)
+    return getattr(state, "name", None) or (str(state) if state is not None else None)
 
 
 class InvoiceExtractor:
     def __init__(self, api_key):
         self.client = genai.Client(api_key=api_key)
 
-    @retry(retry=retry_if_exception_type(ResourceExhausted), wait=wait_fixed(30))
-    def _generate(self, file_path, prompt):
-        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            print(f"⚠️ Skipping upload: File {file_path} is empty or corrupted.")
-            return {}
-
-        uploaded_file = None
+    def _upload_and_wait(self, file_path):
+        """Upload a PDF and block until Gemini has finished processing it."""
+        last_err = None
+        uploaded = None
         for attempt in range(3):
             try:
-                uploaded_file = self.client.files.upload(file=file_path)
+                uploaded = self.client.files.upload(file=file_path)
                 break
             except Exception as e:
-                if attempt == 2:
-                    raise Exception(f"Gemini API rejected the file upload: {e}")
+                last_err = e
+                time.sleep(2 * (attempt + 1))
+        if uploaded is None:
+            # Re-raise the original error so the retry policy can see its status code.
+            raise last_err
+
+        try:
+            deadline = time.time() + 120
+            while _state_name(uploaded) == "PROCESSING":
+                if time.time() > deadline:
+                    raise TimeoutError("Gemini file processing timed out")
+                time.sleep(1)
+                uploaded = self.client.files.get(name=uploaded.name)
+            if _state_name(uploaded) == "FAILED":
+                raise Exception("Gemini file processing failed")
+        except Exception:
+            try:
+                self.client.files.delete(name=uploaded.name)
+            except Exception:
+                pass
+            raise
+        return uploaded
+
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        wait=wait_exponential(multiplier=2, min=5, max=60),
+        stop=stop_after_attempt(6),
+        reraise=True,
+    )
+    def _generate(self, file_path, prompt):
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            # Raise (instead of returning {}) so an unreadable file is reported
+            # as a failure and not silently logged as a successful, empty invoice.
+            raise ValueError(f"File {file_path} is empty or corrupted")
+
+        uploaded_file = self._upload_and_wait(file_path)
 
         try:
             response = self.client.models.generate_content(
@@ -307,10 +355,20 @@ class InvoiceExtractor:
 
         # ↓ CHANGED: store result, sort POs, then return
         result = self._generate(file_path, prompt)
+        if isinstance(result, list):
+            result = result[0] if result else {}
         if result and "po_numbers" in result:
+            pos = result["po_numbers"]
+            # Normalise first: a bare string must not be sorted character by character,
+            # and None must not crash the sort.
+            if pos is None:
+                pos = []
+            elif isinstance(pos, (str, int)):
+                pos = [pos]
             result["po_numbers"] = sorted(
-                result["po_numbers"],
-                key=lambda x: int(x) if x.isdigit() else x
+                (str(p).strip() for p in pos),
+                # Numeric POs first (ascending), anything else after; never compare int to str.
+                key=lambda x: (0, int(x), x) if x.isdigit() else (1, 0, x)
             )
         return result
 
