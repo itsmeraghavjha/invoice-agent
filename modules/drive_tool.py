@@ -30,7 +30,8 @@ class DriveTool:
         wait=wait_exponential(multiplier=1, min=2, max=20),
         reraise=True,
     )
-    def _list_page(self, query, page_token, fields="nextPageToken, files(id, name, webViewLink)"):
+    def _list_page(self, query, page_token,
+                   fields="nextPageToken, files(id, name, webViewLink, modifiedTime, createdTime)"):
         # By default we explicitly ask for the webViewLink here
         return self.service.files().list(
             q=query,
@@ -80,7 +81,7 @@ class DriveTool:
         files = []
         page_token = None
         while True:
-            results = self._list_page(query, page_token, fields="nextPageToken, files(id, name, mimeType)")
+            results = self._list_page(query, page_token, fields="nextPageToken, files(id, name, mimeType, webViewLink, modifiedTime)")
             files.extend(results.get('files', []))
             page_token = results.get('nextPageToken')
             if not page_token:

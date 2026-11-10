@@ -25,3 +25,7 @@ temp_*.pdf
 Thumbs.db
 .vscode/
 .idea/
+
+# --- Team dashboard (generated pages contain real invoice data: never commit) ---
+dashboard/
+dashboard_demo.html
