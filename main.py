@@ -13,6 +13,7 @@ from config import Config, parse_since_date, today_start
 from modules.drive_tool import DriveTool
 from modules.ai_tool import InvoiceExtractor 
 from modules.database import HistoryDB
+from modules.dashboard import build_dashboard
 from modules.email_tool import EmailSender 
 
 # --- HELPERS ---
@@ -86,6 +87,36 @@ def commit_processed_files(results, db_file):
     db.close()
 
 
+def po_warnings(data, pos, valid_pos):
+    """Data-quality notes for a PO invoice the AI read. These do not block processing; they
+    appear on the team dashboard as 'Needs review' so someone can check the invoice."""
+    notes = []
+    if not valid_pos:
+        notes.append("No valid PO number found" + (f" (rejected: {', '.join(map(str, pos))})" if pos else ""))
+    if not data.get('invoice_number'):
+        notes.append("Invoice number missing")
+    if not data.get('invoice_date'):
+        notes.append("Invoice date missing")
+    if not data.get('gross_amount'):
+        notes.append("Gross amount missing or zero")
+    return notes
+
+
+def non_po_warnings(data, ai_line_items, plant):
+    notes = []
+    if not data.get('invoice_number'):
+        notes.append("Invoice number missing")
+    if not data.get('invoice_date'):
+        notes.append("Invoice date missing")
+    if not data.get('gross_amount'):
+        notes.append("Gross amount missing or zero")
+    if not ai_line_items:
+        notes.append("No line items found (invoice header used instead)")
+    if not plant:
+        notes.append("File name is not VENDOR-PLANT-... so vendor and plant may be wrong")
+    return notes
+
+
 def sanitize_pipe(value, replacement=':'):
     """Replace pipe characters within field values to avoid delimiter conflicts."""
     if isinstance(value, str):
@@ -127,6 +158,9 @@ def process_po_invoice(pdf_info):
         return {
             '_file_id': pdf_info['id'],
             '_file_name': pdf_info['name'],
+            '_folder': pdf_info.get('_folder'),
+            '_received': pdf_info.get('modifiedTime'),
+            '_warnings': po_warnings(data, pos, valid_pos),
             'Document Date': normalize_date(data.get('invoice_date')),
             'PO numbers - PO1': valid_pos[0] if len(valid_pos)>0 else None,
             'PO numbers - PO2': valid_pos[1] if len(valid_pos)>1 else None, 
@@ -142,10 +176,10 @@ def process_po_invoice(pdf_info):
         }
     except Exception as e:
         print(f"  ❌ Error on {pdf_info['name']}: {e}")
-        record_failure(pdf_info['name'], pdf_info['id'], e)  # not logged as done -> retried next run
+        record_failure(pdf_info['name'], pdf_info['id'], e, pdf_info)  # not logged as done -> retried next run
         return None
     finally:
-        if os.path.exists(temp_path): 
+        if os.path.exists(temp_path):
             try: os.remove(temp_path)
             except: pass
 
@@ -176,7 +210,8 @@ def process_non_po_invoice(pdf_info):
         
         # Look for the new line items list
         line_items = data.get('line_items', [])
-        
+        warnings = non_po_warnings(data, line_items, plant)
+
         # Fallback just in case the AI returns a flat response
         if not line_items:
             line_items = [{
@@ -190,6 +225,9 @@ def process_non_po_invoice(pdf_info):
             rows.append({
                 '_file_id': pdf_info['id'],
                 '_file_name': pdf_info['name'],
+                '_folder': pdf_info.get('_folder'),
+                '_received': pdf_info.get('modifiedTime'),
+                '_warnings': warnings,
                 'Document Date': normalize_date(data.get('invoice_date')),
                 'Invoice No': data.get('invoice_number'),
                 'Vendor Code': vendor_no,
@@ -210,7 +248,7 @@ def process_non_po_invoice(pdf_info):
         
     except Exception as e:
         print(f"  ❌ Error on {pdf_info['name']}: {e}")
-        record_failure(pdf_info['name'], pdf_info['id'], e)  # not logged as done -> retried next run
+        record_failure(pdf_info['name'], pdf_info['id'], e, pdf_info)  # not logged as done -> retried next run
         return None
     finally:
         if os.path.exists(temp_path):
@@ -276,12 +314,19 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 SCAN_ERRORS = []      # folders we could not read -> invoices inside may have been missed
 SCAN_WARNINGS = []    # non-PDF files that were skipped (photos, shortcuts, Word files...)
 FAILED_FILES = []     # PDFs that failed to process; not logged as done, so retried next run
+SKIPPED_FILES = []    # same as SCAN_WARNINGS but with details, for the team dashboard
+RUN_STATS = {'folders_scanned': 0, 'pdfs_seen': 0}
 _state_lock = threading.Lock()
 
 
-def record_failure(name, file_id, error):
+def record_failure(name, file_id, error, pdf_info=None):
+    info = pdf_info or {}
     with _state_lock:
-        FAILED_FILES.append({'name': name, 'id': file_id, 'error': str(error)})
+        FAILED_FILES.append({
+            'name': name, 'id': file_id, 'error': str(error),
+            'folder': info.get('_folder'), 'url': info.get('webViewLink'),
+            'received': info.get('modifiedTime'), 'kind': info.get('_kind'),
+        })
 
 
 def safe_list(drive_tool, folder_id, mime_type, label, since=None):
@@ -314,10 +359,22 @@ def process_pdfs_in_folder(drive_tool, folder, label, worker_func, results_list)
     if pdfs is None:
         return
 
+    # Remember which folder each PDF came from (shown on the team dashboard) and count
+    # what this run looked at, so "bot ran but saw nothing" is visible too.
+    kind = 'PO' if worker_func is process_po_invoice else 'NonPO'
+    pdfs = [{**p, '_folder': label, '_kind': kind} for p in pdfs]
+    RUN_STATS['folders_scanned'] += 1
+    RUN_STATS['pdfs_seen'] += len(pdfs)
+
     # Surface files we do NOT process, so they are not silently ignored.
     try:
         for o in drive_tool.list_other_files(folder['id'], since=Config.SINCE):
             SCAN_WARNINGS.append(f"{label}/{o['name']} ({o.get('mimeType')}) - not a PDF, skipped")
+            SKIPPED_FILES.append({
+                'id': o.get('id') or f"{label}/{o['name']}", 'name': o['name'], 'folder': label,
+                'url': o.get('webViewLink'), 'received': o.get('modifiedTime'),
+                'mime': o.get('mimeType'), 'kind': kind,
+            })
     except Exception as e:
         SCAN_WARNINGS.append(f"{label}: could not check for non-PDF files ({e})")
 
@@ -344,7 +401,7 @@ def process_pdfs_in_folder(drive_tool, folder, label, worker_func, results_list)
             try:
                 res = f.result()
             except Exception as e:
-                record_failure(futures[f]['name'], futures[f]['id'], e)
+                record_failure(futures[f]['name'], futures[f]['id'], e, futures[f])
                 continue
             if res:
                 if isinstance(res, list):
@@ -458,6 +515,88 @@ def scan_and_process_non_po(drive_tool, root_id, worker_func, results_list):
                 )
 
 
+# --- TEAM DASHBOARD LOG ---
+def _num(v):
+    try:
+        return float(str(v).replace(',', '')) if v not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
+
+
+def build_invoice_records(po_results, non_po_results):
+    """One record per FILE (a Non-PO invoice has one result row per line item)."""
+    recs = {}
+    for r in po_results:
+        pos = [r.get(k) for k in ('PO numbers - PO1', 'PO numbers - PO2', 'PO numbers - PO3') if r.get(k)]
+        recs[r['_file_id']] = {
+            'file_id': r['_file_id'], 'kind': 'PO', 'file_name': r.get('_file_name'),
+            'folder': r.get('_folder'), 'url': r.get('URL'), 'received_at': r.get('_received'),
+            'invoice_no': r.get('Reference'), 'invoice_date': r.get('Document Date'),
+            'po_numbers': ', '.join(map(str, pos)), 'gross_amount': _num(r.get('Gross Value')),
+            'net_amount': _num(r.get('Net value')), 'line_items': 1,
+            'grn': r.get('GRN Number'), 'warnings': '; '.join(r.get('_warnings') or []),
+        }
+    for r in non_po_results:
+        fid = r['_file_id']
+        if fid in recs:
+            recs[fid]['line_items'] += 1
+            continue
+        recs[fid] = {
+            'file_id': fid, 'kind': 'NonPO', 'file_name': r.get('_file_name'),
+            'folder': r.get('_folder'), 'url': r.get('URL Path'), 'received_at': r.get('_received'),
+            'invoice_no': r.get('Invoice No'), 'vendor': r.get('Vendor Code'),
+            'plant': r.get('Plant'), 'invoice_date': r.get('Document Date'),
+            'gross_amount': _num(r.get('Gross Amount')), 'line_items': 1,
+            'grn': r.get('GRN Number'), 'warnings': '; '.join(r.get('_warnings') or []),
+        }
+    return list(recs.values())
+
+
+def persist_run(run_id, po_results, non_po_results):
+    """Write this run to the dashboard log. NEVER raises: a logging problem must not
+    stop invoices from being processed or reported."""
+    if not run_id:
+        return False
+    try:
+        db = HistoryDB(Config.DB_FILE)
+        try:
+            records = build_invoice_records(po_results, non_po_results)
+            for rec in records:
+                db.log_invoice(run_id, rec)
+            for f in FAILED_FILES:
+                db.log_issue(run_id, 'failed_file', f['id'], file_id=f['id'], file_name=f['name'],
+                             folder=f.get('folder'), url=f.get('url'), received_at=f.get('received'),
+                             detail=f['error'], file_kind=f.get('kind'))
+            for s in SKIPPED_FILES:
+                db.log_issue(run_id, 'skipped_non_pdf', s['id'], file_id=s['id'], file_name=s['name'],
+                             folder=s.get('folder'), url=s.get('url'), received_at=s.get('received'),
+                             detail=f"Not a PDF ({s.get('mime')}), so it was skipped",
+                             file_kind=s.get('kind'))
+            for msg in SCAN_ERRORS:
+                key = msg.split(':')[0]
+                db.log_issue(run_id, 'folder_error', key,
+                             folder=key.replace('Could not list ', ''), detail=msg)
+            db.finish_run(run_id, folders_scanned=RUN_STATS['folders_scanned'],
+                          pdfs_seen=RUN_STATS['pdfs_seen'], new_files=len(records),
+                          failed_files=len(FAILED_FILES), skipped_files=len(SKIPPED_FILES),
+                          folder_errors=len(SCAN_ERRORS))
+        finally:
+            db.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Could not update the dashboard log (invoices were still processed): {e}")
+        return False
+
+
+def refresh_dashboard():
+    """Rebuild the team dashboard page. Never raises."""
+    try:
+        path = build_dashboard(Config.DB_FILE, Config.DASHBOARD_PATH)
+        print(f"📊 Team dashboard updated: {path}")
+    except Exception as e:
+        print(f"⚠️ Could not update the team dashboard (invoices were still processed): {e}")
+
+
 def report_problems(email):
     """Print and email everything that may have caused an invoice to be missed."""
     if not (FAILED_FILES or SCAN_ERRORS or SCAN_WARNINGS):
@@ -530,6 +669,17 @@ def main():
     if Config.SINCE:
         print(f"📅 Only files created or modified on/after {Config.SINCE:%d-%b-%Y %H:%M} are considered.")
     print(f"🗓️  Scanning the latest {Config.MONTHS_LOOKBACK} month folder(s) per location.")
+
+    # Start the run log (the team dashboard's heartbeat). Skipped for dry runs.
+    run_id = None
+    if not Config.DRY_RUN:
+        try:
+            log_db = HistoryDB(Config.DB_FILE)
+            run_id = log_db.start_run(mode, Config.SINCE.isoformat() if Config.SINCE else None,
+                                      Config.MONTHS_LOOKBACK)
+            log_db.close()
+        except Exception as e:
+            print(f"⚠️ Could not start the dashboard log: {e}")
 
     # === CYCLE 1: PO INVOICES ===
     if mode in ("po", "both") and Config.ROOT_FOLDER_ID:
@@ -655,6 +805,10 @@ def main():
         print("✅ No new invoices found.")
 
     report_problems(email)
+
+    if not Config.DRY_RUN:
+        persist_run(run_id, po_results, non_po_results)
+        refresh_dashboard()
 
 if __name__ == "__main__":
     main()

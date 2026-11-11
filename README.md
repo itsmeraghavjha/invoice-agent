@@ -24,8 +24,12 @@ config.py               # environment-based configuration
 modules/
   ai_tool.py            # Gemini prompts and extraction
   drive_tool.py         # Google Drive listing and download
-  database.py           # SQLite processed-files tracking
+  database.py           # SQLite processed-files tracking + run log for the dashboard
   email_tool.py         # Gmail SMTP report sender
+  dashboard.py          # builds the team dashboard (one self-contained HTML file)
+  dashboard_template.html   # the page itself (no server, no internet needed)
+  demo_data.py          # invented data for previewing the dashboard
+build_dashboard.py      # rebuild the dashboard without running the bot
 ```
 
 ## Setup
@@ -60,6 +64,53 @@ python main.py both --since=2026-11-09   # only files created/modified on/after 
 
 After changing `MONTHS_LOOKBACK`, run once with `--dry-run` to see which previously-unseen files it will pick up.
 
+## Team dashboard
+
+A read-only page for the accounts team to see what arrived, what the bot processed, and what needs a look. It is one HTML file that is **rewritten after every bot run**; there is no server to run and nothing to install.
+
+**Sharing it:** set `DASHBOARD_PATH` in `.env` to a folder the team can open (a shared network folder works), for example `DASHBOARD_PATH=\\fileserver\invoices\dashboard\index.html`. The team opens the file in a browser and bookmarks it. Press F5 to see the latest run. The default is `dashboard/index.html` next to the bot.
+
+**What the team sees**
+
+- **Day / Week / Month / All time**, with previous and next arrows, and a strip showing files received each day. A weekday with no files stands out as a gap.
+- **Search** (file name, invoice no., vendor, PO, folder, notes), **filters** (type, location, status) and **sorting** on any column. Press `/` to jump to the search box. Click a row's arrow for its details and a link to the file in Drive.
+- **Download this list (CSV)** exports exactly what is on screen. The current view and filters are kept in the page address, so a link or a reload returns to the same view.
+- **Status of every file:** *Processed*, *Needs review* (processed, but something looked off: no valid PO, missing invoice number, date or amount, no line items, file name not `VENDOR-PLANT-...`), *Failed* (the bot will retry it on every run), *Not a PDF* (skipped; needs a PDF or manual handling).
+- **Warnings at the top** when a folder could not be read in the last run, when files failed or were skipped, when the last run did not finish, or when the bot has not run for more than `DASHBOARD_STALE_HOURS` (default 24). This last one matters most: a bot that silently stopped is the biggest way to miss invoices.
+- **Bot runs:** when each run happened, how many folders and PDFs it saw, and how many were new, failed or skipped.
+
+Files processed before the dashboard existed appear as *Older records* with only a name and date. Everything from the next run on has full details.
+
+```
+python build_dashboard.py          # rebuild from the database without running the bot
+python build_dashboard.py --demo   # preview with INVENTED data (dashboard/demo.html)
+python build_dashboard.py --demo --stale   # preview the "bot stopped" warning
+```
+
+**Privacy.** The page contains invoice numbers, vendors and amounts, so keep it in a folder only the team can read. `dashboard/` is git-ignored; never commit a generated page. Links to files open in Google Drive, which still checks the viewer's own Drive access. The dashboard never changes anything: it only reads the history database.
+
+If the dashboard cannot be updated (for example the shared folder is offline), the bot logs a warning and still processes and reports invoices as normal.
+
+## Live dashboard (keeps updating by itself)
+
+```
+python serve_dashboard.py            # then open http://localhost:8080
+python serve_dashboard.py --demo     # try it with invented data that keeps changing
+```
+
+The page asks the server for fresh data every 30 seconds and redraws without a reload. It shows a
+red banner if it loses the server, and another if the bot itself has not run for too long.
+
+- The server is **read-only**: it only reads `invoice_history.db` and never runs the bot. Run the
+  bot as usual (separately); the page picks up each run.
+- To let the team open it, set in `.env`: `DASHBOARD_HOST=0.0.0.0` and `DASHBOARD_PASSWORD=...`,
+  then share `http://<this-computer>:8080`. Any username works; the password is shared. It refuses
+  to listen on the network without a password (override: `--no-password`).
+- Plain HTTP with a shared password: keep it on your internal network, never the internet.
+  Allow the port in the Windows firewall if others cannot reach it.
+- To keep it running, start it from Task Scheduler ("at startup") or as a service with NSSM.
+- Settings: `DASHBOARD_PORT`, `DASHBOARD_REFRESH_SECONDS` (min 5). `/healthz` is an open uptime check.
+
 ## Tests
 
 ```
@@ -67,4 +118,4 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-The tests use fakes for Drive and Gemini, so no credentials are needed.
+The tests use fakes for Drive and Gemini, so no credentials are needed. The dashboard's browser tests need `pip install playwright` and `playwright install chromium`; without them those tests are skipped.

@@ -53,5 +53,27 @@ class Config:
     # variable, so a forgotten setting can never silently hide new invoices on later runs.
     SINCE = None
 
+    # Team dashboard: a single HTML file rewritten after every run. Point DASHBOARD_PATH at a
+    # shared folder so the team can open it. It shows a warning when the bot has not run for
+    # more than DASHBOARD_STALE_HOURS.
+    DASHBOARD_PATH = os.getenv("DASHBOARD_PATH", "dashboard/index.html")
+    try:
+        DASHBOARD_STALE_HOURS = max(1, int(os.getenv("DASHBOARD_STALE_HOURS", "24")))
+    except ValueError:
+        DASHBOARD_STALE_HOURS = 24
+
+    # Live dashboard server (python serve_dashboard.py). By default it listens on this computer
+    # only; set DASHBOARD_HOST=0.0.0.0 (and a DASHBOARD_PASSWORD) to let the team reach it.
+    DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD") or None
+    try:
+        DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8080"))
+    except ValueError:
+        DASHBOARD_PORT = 8080
+    try:
+        DASHBOARD_REFRESH_SECONDS = max(5, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "30")))
+    except ValueError:
+        DASHBOARD_REFRESH_SECONDS = 30
+
     DB_FILE = "invoice_history.db"
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
