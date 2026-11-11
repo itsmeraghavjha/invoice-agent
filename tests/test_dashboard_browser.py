@@ -334,11 +334,11 @@ def test_phone_width_does_not_scroll_sideways(open_page, demo):
         assert o.page.evaluate("document.documentElement.scrollWidth") <= 391, view
 
 
-def test_dark_mode_is_actually_dark(open_page, demo):
+def test_page_stays_light_even_when_the_computer_is_in_dark_mode(open_page, demo):
     path, _ = demo
     o = open_page(path, color_scheme="dark")
     r, g, b = map(int, re.findall(r"\d+", o.page.evaluate("getComputedStyle(document.body).backgroundColor"))[:3])
-    assert (0.299 * r + 0.587 * g + 0.114 * b) < 60
+    assert (0.299 * r + 0.587 * g + 0.114 * b) > 200
 
 
 def test_slash_focuses_the_search_box(open_page, demo):

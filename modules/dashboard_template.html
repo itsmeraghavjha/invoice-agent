@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
 <title>Invoice Bot - Team view</title>
 <style>
 :root {
@@ -26,22 +26,6 @@
   --row-hover: #F6F8FC;
   --font: "Bahnschrift", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --radius: 6px;
-}
-:root[data-theme="dark"] {
-  --bg: #0D1525; --surface: #152036; --ink: #E5EBF6; --muted: #98A8C2; --line: #26354F; --line-strong: #3B4D6D;
-  --band: #0A111F; --band-ink: #E5EBF6; --accent: #8FA9FF; --accent-soft: #1F2F57; --bar: #6F8CE0;
-  --ok: #6FD7A2; --ok-soft: #173A2B; --review: #F0BE62; --review-soft: #3F3216;
-  --fail: #FF8F86; --fail-soft: #47201D; --skip: #A9B4C4; --skip-soft: #232F43;
-  --info-soft: #1F2F57; --row-hover: #1A2842;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0D1525; --surface: #152036; --ink: #E5EBF6; --muted: #98A8C2; --line: #26354F; --line-strong: #3B4D6D;
-    --band: #0A111F; --band-ink: #E5EBF6; --accent: #8FA9FF; --accent-soft: #1F2F57; --bar: #6F8CE0;
-    --ok: #6FD7A2; --ok-soft: #173A2B; --review: #F0BE62; --review-soft: #3F3216;
-    --fail: #FF8F86; --fail-soft: #47201D; --skip: #A9B4C4; --skip-soft: #232F43;
-    --info-soft: #1F2F57; --row-hover: #1A2842;
-  }
 }
 
 * { box-sizing: border-box; }
@@ -84,7 +68,6 @@ main { max-width: 1320px; margin: 0 auto; padding: 18px 20px 48px; }
 .alert.info { background: var(--info-soft); border-color: var(--accent); color: var(--ink); }
 .alert .mark { font-weight: 800; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; color: #fff; font-size: 14px; }
 .alert.bad .mark { background: var(--fail); } .alert.warn .mark { background: var(--review); } .alert.info .mark { background: var(--accent); }
-:root[data-theme="dark"] .alert .mark { color: #0D1525; }
 .btn { border: 1px solid var(--line-strong); background: var(--surface); border-radius: var(--radius); padding: 6px 12px; font-weight: 600; white-space: nowrap; }
 .btn:hover { border-color: var(--accent); }
 .btn.link { border: 0; background: none; color: var(--accent); padding: 6px 4px; text-decoration: underline; }
@@ -96,7 +79,6 @@ main { max-width: 1320px; margin: 0 auto; padding: 18px 20px 48px; }
 .seg button { border: 0; background: none; padding: 8px 16px; font-weight: 600; border-right: 1px solid var(--line); }
 .seg button:last-child { border-right: 0; }
 .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
-:root[data-theme="dark"] .seg button[aria-pressed="true"] { color: #0D1525; }
 .nav { display: inline-flex; gap: 6px; }
 .nav .btn { padding: 6px 12px; min-width: 40px; font-size: 18px; line-height: 1; }
 .plabel { font-size: 22px; font-weight: 700; margin: 0; flex: 1 1 260px; min-width: 0; }
