@@ -41,18 +41,40 @@ build_dashboard.py      # rebuild the dashboard without running the bot
 
 `.env`, `token.json`, `credentials.json` and `invoice_history.db` are git-ignored and must never be committed.
 
-## Usage
+## Quick commands
 
+Use two terminal windows in the project folder. The bot and the dashboard are separate and do not depend on each other.
+
+**Bot**
 ```
-python main.py                  # run both pipelines
-python main.py po               # PO invoices only
-python main.py nonpo            # Non-PO invoices only
-python main.py both --dry-run   # list what WOULD be processed; nothing is called, written or logged
-python main.py both --today     # only files created/modified today (hard cutoff for this run)
-python main.py both --since=2026-11-09   # only files created/modified on/after that date
+python main.py                           # run both pipelines (PO and Non-PO)
+python main.py po                        # PO invoices only
+python main.py nonpo                     # Non-PO invoices only
+python main.py both --today              # only files created/modified today
+python main.py both --since=2026-11-10   # only files on/after that date (YYYY-MM-DD), e.g. from yesterday
+python main.py both --dry-run            # list what WOULD be processed; nothing is called, written or logged
+python main.py both --since=2026-11-10 --dry-run   # preview a date range first
 ```
 
-`--today` / `--since=` filter on the Drive **created or modified** time, so older files are ignored even if they sit in a month folder that is being scanned. They apply to one run only (not an env setting), so a later normal run is never limited by accident. Combine with `--dry-run` to preview first.
+`--today` / `--since=` filter on the Drive **created or modified** time, so older files are ignored even if they sit in a month folder that is being scanned. They apply to one run only (not an env setting), so a later normal run is never limited by accident.
+
+**Dashboard** (leave it running)
+```
+python serve_dashboard.py                # open http://localhost:8080
+python serve_dashboard.py --demo         # try it with invented data
+python serve_dashboard.py --port 9000    # use another port
+python build_dashboard.py                # rebuild the saved HTML file only (no server)
+```
+To let the team open it, set `DASHBOARD_HOST=0.0.0.0` and `DASHBOARD_PASSWORD=...` in `.env`, then share `http://<this-computer>:8080`.
+
+**Tests**
+```
+python -m pytest tests -q
+```
+
+### If a run gets stuck or fails
+
+Just run the same command again. A file is marked done only after its SAP file is written, so unfinished or failed files are picked up next time and finished ones are skipped. The dashboard shows a banner if the last run did not finish, and lists failed files with a "Show failed" button. To pick up only recent files, use `--today` or `--since=`. After a crash in the middle of a run, check the SAP staging folder for duplicates.
 
 ## Not missing invoices
 
