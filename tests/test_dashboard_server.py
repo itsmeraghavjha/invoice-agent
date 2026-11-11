@@ -275,3 +275,23 @@ def test_refresh_interval_cannot_be_set_below_five_seconds(db):
 def test_a_port_that_is_taken_fails_cleanly(srv):
     with pytest.raises(OSError):
         make_server(srv.app, "127.0.0.1", srv.port)
+
+
+def test_a_browser_that_hangs_up_mid_reply_is_not_an_error(srv, capsys):
+    import socket
+    for _ in range(5):
+        c = socket.create_connection(("127.0.0.1", srv.port))
+        c.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")  # reset, like a closed tab
+        c.close()
+    time.sleep(0.5)
+    assert "Traceback" not in capsys.readouterr().err
+    assert srv.get("/healthz")[0] == 200                  # and the server carries on
+
+
+def test_real_bugs_are_still_reported(srv, capsys):
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        srv.server.handle_error(None, ("127.0.0.1", 1))
+    assert "boom" in capsys.readouterr().err

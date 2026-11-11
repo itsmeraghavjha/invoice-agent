@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -154,6 +155,13 @@ def make_handler(app):
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # A browser that reloads, navigates away or closes a tab drops its connection mid-reply
+        # (Windows: WinError 10053/10054). That is normal and not worth a traceback.
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def make_server(app, host="127.0.0.1", port=8080):
