@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 from modules.database import DASHBOARD_SCHEMA
 
@@ -27,22 +28,45 @@ def _legacy_to_iso(text):
         return None
 
 
-def collect_data(db_file, stale_hours=24, demo=False):
-    """Everything the page shows, as plain JSON-able data."""
-    conn = sqlite3.connect(db_file)
+def _safe_rows(conn, sql, params=()):
+    """Like _rows, but a table that does not exist yet (database written by an older version
+    of the bot) is simply empty. Used on the read-only path, which must never create tables."""
     try:
-        conn.executescript(DASHBOARD_SCHEMA)  # old databases get the (empty) new tables
-        has_legacy = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='processed_files'"
-        ).fetchone()
+        return _rows(conn, sql, params)
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            return []
+        raise
 
-        invoices = _rows(conn, "SELECT * FROM invoice_log")
-        issues = _rows(conn, "SELECT * FROM issue_log")
-        runs = _rows(conn, "SELECT * FROM runs ORDER BY run_id DESC LIMIT ?", (MAX_RUNS,))
-        legacy = _rows(conn, "SELECT file_id, file_name, processed_at FROM processed_files") if has_legacy else []
-        latest_run_id = conn.execute("SELECT MAX(run_id) FROM runs").fetchone()[0]
+
+def _read(db_file, read_only):
+    """Everything we need from the database. In read-only mode the file is opened with
+    mode=ro and nothing is created or written, so a live server can sit next to a running
+    bot without ever contending with it or changing the history."""
+    if read_only:
+        if not os.path.exists(db_file):
+            return [], [], [], [], None
+        conn = sqlite3.connect(Path(db_file).resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    else:
+        conn = sqlite3.connect(db_file)
+        conn.executescript(DASHBOARD_SCHEMA)  # old databases get the (empty) new tables
+    rows = _safe_rows   # a missing table (e.g. no processed_files yet) is just empty
+    try:
+        invoices = rows(conn, "SELECT * FROM invoice_log")
+        issues = rows(conn, "SELECT * FROM issue_log")
+        runs = rows(conn, "SELECT * FROM runs ORDER BY run_id DESC LIMIT ?", (MAX_RUNS,))
+        legacy = rows(conn, "SELECT file_id, file_name, processed_at FROM processed_files")
+        latest = rows(conn, "SELECT MAX(run_id) AS m FROM runs")
+        return invoices, issues, runs, legacy, (latest[0]["m"] if latest else None)
     finally:
         conn.close()
+
+
+def collect_data(db_file, stale_hours=24, demo=False, read_only=False):
+    """Everything the page shows, as plain JSON-able data.
+
+    read_only=True is for the live server: it never writes to (or creates) the database."""
+    invoices, issues, runs, legacy, latest_run_id = _read(db_file, read_only)
 
     files, logged_ids = [], set()
 

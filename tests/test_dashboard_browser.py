@@ -152,7 +152,7 @@ def test_clicking_a_day_in_the_strip_opens_that_day(open_page, demo):
     click_view(o.page, "month")
     busiest = max((d for d in range(1, today_ist().day + 1)),
                   key=lambda d: len(in_view(data["files"], "day", today_ist().replace(day=d))))
-    o.page.click(f'#strip button:has-text("{busiest}") >> nth=0')
+    o.page.locator('#strip button', has=o.page.locator('b', has_text=re.compile(rf'^{busiest}$'))).first.click()
     assert total(o.page) == len(in_view(data["files"], "day", today_ist().replace(day=busiest)))
 
 

@@ -65,6 +65,10 @@ button { cursor: pointer; }
 .health.none .dot { background: #AEB9CC; }
 .health b { font-weight: 700; }
 .health .sub { opacity: .75; }
+.live { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.live .pulse { width: 8px; height: 8px; border-radius: 50%; background: #6FD7A2; flex: none; }
+.live.lost { color: #FFB4AC; font-weight: 700; }
+.live.lost .pulse { background: #FF8F86; }
 
 main { max-width: 1320px; margin: 0 auto; padding: 18px 20px 48px; }
 
@@ -200,6 +204,7 @@ details.runs table { min-width: 760px; }
   main { padding: 14px 14px 40px; }
   .top-in { padding: 12px 14px; }
   .health { margin-left: 0; width: 100%; }
+  .live { width: 100%; }
   .plabel { font-size: 19px; flex-basis: 100%; order: 3; }
   .big { font-size: 34px; }
   .split { margin-left: 0; }
@@ -223,6 +228,7 @@ details.runs table { min-width: 760px; }
     <h1 class="brand">Invoice Bot<small>Team view</small></h1>
     <span class="demo-badge" id="demo" hidden>Demo data</span>
     <div class="health none" id="health" role="status"></div>
+    <div class="live" id="live" role="status" hidden></div>
   </div>
 </header>
 
@@ -313,7 +319,7 @@ details.runs table { min-width: 760px; }
 (function () {
 'use strict';
 
-var DATA = JSON.parse(document.getElementById('app-data').textContent);
+var DATA, FILES, RUNS, LOCATIONS, NOW, LIVE;   // set by load(); live mode calls load() again with fresh data
 var $ = function (id) { return document.getElementById(id); };
 
 /* tiny DOM helper: values are always set as text, never as HTML */
@@ -391,20 +397,25 @@ function locationOf(folder) {
   if (!month) { loc = parts; }
   return { loc: loc.join('/'), month: month, sub: rest.join('/') };
 }
-var FILES = DATA.files.map(function (f) {
-  var t = Date.parse(f.received); if (isNaN(t)) t = 0;
-  var l = locationOf(f.folder);
-  var o = Object.assign({}, f, { t: t, day: t ? sod(t) : 0, loc: l.loc, month: l.month, sub: l.sub, name: f.name || '(no name)' });
-  o.hay = [o.name, f.invoice_no, f.vendor, f.plant, f.po, f.grn, f.folder, f.notes, f.invoice_date].join(' ').toLowerCase();
-  return o;
-});
-var RUNS = DATA.runs.map(function (r) {
-  return Object.assign({}, r, { st: Date.parse(r.started) || 0, ft: r.finished ? Date.parse(r.finished) : 0 });
-});
-var LOCATIONS = Array.from(new Set(FILES.map(function (f) { return f.loc; }).filter(Boolean))).sort(function (a, b) { return a.localeCompare(b); });
+function load(d) {
+  DATA = d;
+  NOW = Date.now();
+  FILES = d.files.map(function (f) {
+    var t = Date.parse(f.received); if (isNaN(t)) t = 0;
+    var l = locationOf(f.folder);
+    var o = Object.assign({}, f, { t: t, day: t ? sod(t) : 0, loc: l.loc, month: l.month, sub: l.sub, name: f.name || '(no name)' });
+    o.hay = [o.name, f.invoice_no, f.vendor, f.plant, f.po, f.grn, f.folder, f.notes, f.invoice_date].join(' ').toLowerCase();
+    return o;
+  });
+  RUNS = d.runs.map(function (r) {
+    return Object.assign({}, r, { st: Date.parse(r.started) || 0, ft: r.finished ? Date.parse(r.finished) : 0 });
+  });
+  LOCATIONS = Array.from(new Set(FILES.map(function (f) { return f.loc; }).filter(Boolean))).sort(function (a, b) { return a.localeCompare(b); });
+}
+load(JSON.parse(document.getElementById('app-data').textContent));
+LIVE = DATA.live || null;      // present only when served by serve_dashboard.py
 
 /* ---------- state (kept in the URL so a view can be shared or bookmarked) ---------- */
-var NOW = Date.now();
 var state = { view: 'day', anchor: sod(NOW), q: '', type: '', loc: '', status: 'all', sort: 'received', dir: -1, page: 1 };
 var open = {};
 
@@ -498,7 +509,14 @@ function renderHealth() {
 }
 
 function renderAlerts() {
-  var box = $('alerts'); box.textContent = '';
+  var box = document.createElement('div');
+  buildAlerts(box);
+  var real = $('alerts'), sig = box.textContent;
+  if (real.dataset.sig === sig) return;          // nothing changed: leave the page (and focus) alone
+  real.dataset.sig = sig; real.textContent = '';
+  while (box.firstChild) real.append(box.firstChild);
+}
+function buildAlerts(box) {
   var last = RUNS[0];
 
   function alert(kind, title, body, actions, list) {
@@ -513,6 +531,12 @@ function renderAlerts() {
       state.view = 'all'; state.status = status; state.q = ''; state.type = ''; state.loc = ''; state.page = 1; sync(true);
       $('tablebox').scrollIntoView({ block: 'start', behavior: 'smooth' });
     } });
+  }
+
+  if (LIVE && !conn.ok) {
+    alert('bad', 'Live updates have stopped',
+      'This page cannot reach the dashboard server, so what you see may be out of date. It was last updated ' + dt(conn.at) + ' and will keep trying.', [
+        h('button', { type: 'button', class: 'btn', text: 'Try now', onclick: function () { refresh(); } })]);
   }
 
   if (!last && FILES.length === 0) return;
@@ -794,6 +818,51 @@ function downloadCsv(rows) {
   document.body.append(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
 }
 
+/* ---------- live refresh (only when served by serve_dashboard.py) ---------- */
+var conn = { ok: true, at: Date.now(), lastText: null };
+var busy = false, timer = null;
+
+function renderLive() {
+  var el = $('live'); el.textContent = '';
+  if (!LIVE) { el.hidden = true; return; }
+  el.hidden = false; el.className = 'live' + (conn.ok ? '' : ' lost');
+  el.append(h('span', { class: 'pulse', 'aria-hidden': 'true' }),
+    conn.ok ? 'Live. Updated ' + F.time.format(conn.at) : 'Not connected. Data is from ' + F.time.format(conn.at));
+}
+function fillLocations() {
+  var sel = $('loc'); sel.length = 1;
+  LOCATIONS.forEach(function (l) { sel.append(h('option', { value: l, text: l })); });
+  if (state.loc && LOCATIONS.indexOf(state.loc) < 0) state.loc = '';
+  sel.value = state.loc;
+}
+function renderAll() {
+  renderHealth(); renderAlerts(); renderRuns(); renderLive(); fillLocations(); sync(false);
+}
+function schedule() {
+  clearTimeout(timer);
+  if (LIVE) timer = setTimeout(refresh, LIVE.every * 1000);
+}
+function refresh() {
+  if (!LIVE || busy) return;
+  busy = true;
+  var ctl = new AbortController(), giveUp = setTimeout(function () { ctl.abort(); }, 20000);
+  fetch(LIVE.url, { cache: 'no-cache', credentials: 'same-origin', signal: ctl.signal })
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+    .then(function (text) {
+      conn.ok = true; conn.at = Date.now();
+      if (text !== conn.lastText) {                // new data: redraw, keeping filters and open rows
+        conn.lastText = text;
+        var d = JSON.parse(text); LIVE = d.live || LIVE;
+        load(d); renderAll();
+      } else { renderLive(); renderAlerts(); }
+    })
+    .catch(function () { conn.ok = false; renderLive(); renderAlerts(); })
+    .then(function () { clearTimeout(giveUp); busy = false; schedule(); });
+}
+function tick() {                                  // keeps "last run 2 h ago" honest while nothing else changes
+  NOW = Date.now(); renderHealth(); renderAlerts();
+}
+
 /* ---------- wiring ---------- */
 function filtersActive() { return !!(state.q || state.type || state.loc || state.status !== 'all'); }
 function clearFilters() { state.q = ''; state.type = ''; state.loc = ''; state.status = 'all'; state.page = 1; sync(true); }
@@ -808,8 +877,7 @@ function sync(full) {
 
 function init() {
   $('demo').hidden = !DATA.demo;
-  var sel = $('loc');
-  LOCATIONS.forEach(function (l) { sel.append(h('option', { value: l, text: l })); });
+  fillLocations();
   if (!FILES.some(function (f) { return f.legacy; })) [].forEach.call($('type').options, function (o) { if (o.value === 'old') o.remove(); });
   loadHash();
 
@@ -845,8 +913,14 @@ function init() {
     if (e.key === '/' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('q').focus(); }
   });
 
-  renderHealth(); renderAlerts(); renderRuns();
+  renderHealth(); renderAlerts(); renderRuns(); renderLive();
   sync(true);
+  setInterval(tick, 30000);
+  if (LIVE) {
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) { clearTimeout(timer); refresh(); } });
+    window.addEventListener('online', function () { clearTimeout(timer); refresh(); });
+    schedule();
+  }
 }
 init();
 })();

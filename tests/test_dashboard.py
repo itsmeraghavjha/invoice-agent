@@ -226,3 +226,48 @@ def test_the_team_page_never_leaks_into_git():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ignored = open(os.path.join(root, ".gitignore"), encoding="utf-8").read()
     assert "dashboard/" in ignored            # generated pages hold real invoice data
+
+
+# ------------------------------------------------------------- read-only reading (live server)
+def test_read_only_never_writes_or_creates_tables(tmp_path):
+    path = str(tmp_path / "old.db")
+    old = HistoryDB(path)                       # a database as the OLD bot version left it
+    old.log_success("legacy1", "legacy1.pdf")
+    old.close()
+    before = open(path, "rb").read()
+    mtime = os.stat(path).st_mtime_ns
+
+    d = collect_data(path, read_only=True)
+    assert [f["id"] for f in d["files"]] == ["legacy1"] and d["runs"] == []
+    names = {r[0] for r in sqlite3.connect(path).execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert names == {"processed_files"}                      # no dashboard tables were created
+    assert open(path, "rb").read() == before and os.stat(path).st_mtime_ns == mtime
+
+
+def test_read_only_database_cannot_be_written_through_the_reader(tmp_path):
+    from modules.dashboard import _read
+    path = str(tmp_path / "w.db")
+    HistoryDB(path).close()
+    import modules.dashboard as dash
+    conn = sqlite3.connect(dash.Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    with pytest.raises(sqlite3.OperationalError):
+        conn.execute("CREATE TABLE x (a)")
+
+
+def test_read_only_with_a_missing_database_is_just_empty(tmp_path):
+    missing = str(tmp_path / "nope.db")
+    d = collect_data(missing, read_only=True)
+    assert d["files"] == [] and d["runs"] == [] and not os.path.exists(missing)   # and nothing was created
+
+
+def test_read_only_matches_the_normal_reader_on_a_full_database(tmp_path):
+    db = make_demo_db(str(tmp_path / "demo.db"))
+    a, b = collect_data(db), collect_data(db, read_only=True)
+    a.pop("generated_at"), b.pop("generated_at")
+    assert a == b
+
+
+def test_database_without_processed_files_table_still_builds(tmp_path):
+    path = str(tmp_path / "bare.db")
+    sqlite3.connect(path).close()
+    assert collect_data(path)["files"] == [] and collect_data(path, read_only=True)["files"] == []

@@ -62,5 +62,18 @@ class Config:
     except ValueError:
         DASHBOARD_STALE_HOURS = 24
 
+    # Live dashboard server (python serve_dashboard.py). By default it listens on this computer
+    # only; set DASHBOARD_HOST=0.0.0.0 (and a DASHBOARD_PASSWORD) to let the team reach it.
+    DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD") or None
+    try:
+        DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8080"))
+    except ValueError:
+        DASHBOARD_PORT = 8080
+    try:
+        DASHBOARD_REFRESH_SECONDS = max(5, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "30")))
+    except ValueError:
+        DASHBOARD_REFRESH_SECONDS = 30
+
     DB_FILE = "invoice_history.db"
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']

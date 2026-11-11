@@ -91,6 +91,26 @@ python build_dashboard.py --demo --stale   # preview the "bot stopped" warning
 
 If the dashboard cannot be updated (for example the shared folder is offline), the bot logs a warning and still processes and reports invoices as normal.
 
+## Live dashboard (keeps updating by itself)
+
+```
+python serve_dashboard.py            # then open http://localhost:8080
+python serve_dashboard.py --demo     # try it with invented data that keeps changing
+```
+
+The page asks the server for fresh data every 30 seconds and redraws without a reload. It shows a
+red banner if it loses the server, and another if the bot itself has not run for too long.
+
+- The server is **read-only**: it only reads `invoice_history.db` and never runs the bot. Run the
+  bot as usual (separately); the page picks up each run.
+- To let the team open it, set in `.env`: `DASHBOARD_HOST=0.0.0.0` and `DASHBOARD_PASSWORD=...`,
+  then share `http://<this-computer>:8080`. Any username works; the password is shared. It refuses
+  to listen on the network without a password (override: `--no-password`).
+- Plain HTTP with a shared password: keep it on your internal network, never the internet.
+  Allow the port in the Windows firewall if others cannot reach it.
+- To keep it running, start it from Task Scheduler ("at startup") or as a service with NSSM.
+- Settings: `DASHBOARD_PORT`, `DASHBOARD_REFRESH_SECONDS` (min 5). `/healthz` is an open uptime check.
+
 ## Tests
 
 ```
